@@ -1,0 +1,26 @@
+# Binaries & compiled artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test and coverage outputs
+*.test
+*.out
+
+# Local configuration with sensitive tokens
+config.json
+
+# Legacy web UI
+/web/
+
+# IDE and OS files
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+ehthumbs.db
+[Dd]esktop.ini
