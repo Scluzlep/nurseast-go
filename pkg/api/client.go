@@ -9,11 +9,14 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"nurseast-go/pkg/config"
 )
 
 type Client struct {
 	httpClient  *http.Client
 	accessToken string
+	cfg         *config.Config
 	mu          sync.RWMutex
 }
 
@@ -23,6 +26,17 @@ func NewClient(token string) *Client {
 			Timeout: 15 * time.Second,
 		},
 		accessToken: token,
+		cfg:         config.Load(),
+	}
+}
+
+func NewClientWithConfig(cfg *config.Config) *Client {
+	return &Client{
+		httpClient: &http.Client{
+			Timeout: 15 * time.Second,
+		},
+		accessToken: cfg.AccessToken,
+		cfg:         cfg,
 	}
 }
 
@@ -30,6 +44,9 @@ func (c *Client) SetAccessToken(token string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.accessToken = token
+	if c.cfg != nil {
+		c.cfg.AccessToken = token
+	}
 }
 
 func (c *Client) GetAccessToken() string {
@@ -41,15 +58,31 @@ func (c *Client) GetAccessToken() string {
 func (c *Client) baseParams(method, apiVersion string) map[string]interface{} {
 	c.mu.RLock()
 	token := c.accessToken
+	cfg := c.cfg
 	c.mu.RUnlock()
+
+	sysVersion := "12"
+	deviceModel := "android"
+	codeVersion := "7.6.9"
+	if cfg != nil {
+		if cfg.SysVersion != "" {
+			sysVersion = cfg.SysVersion
+		}
+		if cfg.DeviceModel != "" {
+			deviceModel = cfg.DeviceModel
+		}
+		if cfg.CodeVersion != "" {
+			codeVersion = cfg.CodeVersion
+		}
+	}
 
 	callID := GenerateCallID()
 	sig := GenerateSignature(DefaultAPIKey, callID, method)
 
 	return map[string]interface{}{
-		"sysVersion":   "12",
-		"deviceModel":  "android",
-		"codeVersion":  "7.6.9",
+		"sysVersion":   sysVersion,
+		"deviceModel":  deviceModel,
+		"codeVersion":  codeVersion,
 		"api_key":      DefaultAPIKey,
 		"_app_project": "hlzs",
 		"_project":     "hlzs",
@@ -82,7 +115,7 @@ func (c *Client) postJSONContext(ctx context.Context, url string, payload map[st
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("请求网络异常: %w", err)
+		return fmt.Errorf("网络请求异常: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -112,8 +145,67 @@ func responseError(success bool, msg string) error {
 	return fmt.Errorf("请求失败: %s", msg)
 }
 
+// GetDeviceToken 从 oauth/token 接口获取初始设备临时 token
+func (c *Client) GetDeviceToken() (string, error) {
+	url := "https://hlzs.hulizhushou.com/oauth/token"
+	callID := GenerateCallID()
+	method := "token"
+	sig := GenerateSignature(DefaultAPIKey, callID, method)
+
+	c.mu.RLock()
+	devNumber := ""
+	if c.cfg != nil {
+		devNumber = c.cfg.DeviceNumber
+	}
+	c.mu.RUnlock()
+
+	if devNumber == "" {
+		devNumber = GenerateUUID()
+	}
+
+	payload := map[string]interface{}{
+		"grant_type":   "device",
+		"devicenumber": devNumber,
+		"os_version":   "12",
+		"os_type":      "Android",
+		"client_id":    DefaultAPIKey,
+		"sysVersion":   "12",
+		"deviceModel":  "android",
+		"codeVersion":  "7.6.9",
+		"method":       method,
+		"api_key":      DefaultAPIKey,
+		"_app_project": "hlzs",
+		"_project":     "hlzs",
+		"call_id":      callID,
+		"apiversion":   "1.0",
+		"sig":          sig,
+	}
+
+	type oauthResp struct {
+		AccessToken string `json:"access_token"`
+		ExpiresIn   int    `json:"expires_in"`
+	}
+
+	var resp oauthResp
+	if err := c.postJSON(url, payload, &resp); err != nil {
+		return "", err
+	}
+	if resp.AccessToken == "" {
+		return "", fmt.Errorf("未能获取到设备临时 Token")
+	}
+	return resp.AccessToken, nil
+}
+
 // SendLoginCode 发送登录验证码
 func (c *Client) SendLoginCode(phone string) (*LoginData, error) {
+	if c.GetAccessToken() == "" {
+		tempToken, err := c.GetDeviceToken()
+		if err != nil {
+			return nil, fmt.Errorf("获取设备临时凭据失败: %w", err)
+		}
+		c.SetAccessToken(tempToken)
+	}
+
 	url := "https://hlzs.hulizhushou.com/api/1.0/hlzs/login"
 	payload := c.baseParams("hlzs/login", "1.0")
 	payload["phone"] = phone
@@ -136,13 +228,30 @@ func (c *Client) SendLoginCode(phone string) (*LoginData, error) {
 
 // SubmitLoginCode 校验验证码完成登录
 func (c *Client) SubmitLoginCode(phone, code string) (*LoginData, error) {
+	if c.GetAccessToken() == "" {
+		tempToken, err := c.GetDeviceToken()
+		if err != nil {
+			return nil, fmt.Errorf("获取设备临时凭据失败: %w", err)
+		}
+		c.SetAccessToken(tempToken)
+	}
+
 	url := "https://hlzs.hulizhushou.com/api/1.0/hlzs/login"
 	payload := c.baseParams("hlzs/login", "1.0")
 	payload["phone"] = phone
 	payload["re_code"] = code
 	payload["device_token"] = ""
-	payload["jpush_device_token"] = "190e35f7e1138e91ae8"
-	payload["manufacturer_brand"] = "huawei"
+
+	c.mu.RLock()
+	cfg := c.cfg
+	c.mu.RUnlock()
+
+	if cfg != nil && cfg.JPushDeviceToken != "" {
+		payload["jpush_device_token"] = cfg.JPushDeviceToken
+	}
+	if cfg != nil && cfg.ManufacturerBrand != "" {
+		payload["manufacturer_brand"] = cfg.ManufacturerBrand
+	}
 	payload["manufacturer_token"] = ""
 	payload["app_os"] = "android"
 
@@ -167,8 +276,17 @@ func (c *Client) GetSwitchUnitsInfo() (*SwitchUnitsData, error) {
 	url := "https://hlzs.hulizhushou.com/api/1.0/hlzs/user/switch_units_info"
 	payload := c.baseParams("hlzs/user/switch_units_info", "1.0")
 	payload["config_platform"] = "hlzs"
-	payload["jpush_device_token"] = "190e35f7e1138e91ae8"
-	payload["manufacturer_brand"] = "huawei"
+
+	c.mu.RLock()
+	cfg := c.cfg
+	c.mu.RUnlock()
+
+	if cfg != nil && cfg.JPushDeviceToken != "" {
+		payload["jpush_device_token"] = cfg.JPushDeviceToken
+	}
+	if cfg != nil && cfg.ManufacturerBrand != "" {
+		payload["manufacturer_brand"] = cfg.ManufacturerBrand
+	}
 
 	type innerData struct {
 		Status string          `json:"status"`
@@ -231,6 +349,7 @@ func (c *Client) getSubjectsPage(page int) (*SubjectsData, error) {
 	url := "https://hlzs.hulizhushou.com/api/1.0/hlzs/pro/subjects"
 	payload := c.baseParams("hlzs/pro/subjects", "1.0")
 	payload["obj_type"] = 0
+	payload["use_page"] = true
 	payload["is_first"] = true
 	payload["first_install"] = false
 	if page > 1 {

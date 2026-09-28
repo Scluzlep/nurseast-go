@@ -1,4 +1,4 @@
-package main
+﻿package main
 
 import (
 	"encoding/json"
@@ -844,6 +844,9 @@ func onShowLoginDialog() {
 							token = loginData.AccessToken
 						}
 						if token == "" {
+							token = loginClient.GetAccessToken()
+						}
+						if token == "" {
 							dlg.Synchronize(func() {
 								if requestID == credentialSeq {
 									walk.MsgBox(dlg, "登录失败", "服务器未返回 AccessToken，无法继续。", walk.MsgBoxIconError)
@@ -870,6 +873,12 @@ func onShowLoginDialog() {
 							appConfig.AccessToken = token
 							appConfig.Phone = phone
 							appConfig.UnitName = unitName
+							if loginData.UserID > 0 {
+								appConfig.UserID = loginData.UserID
+							}
+							if unitData.CurrentUnit.UnitID > 0 {
+								appConfig.UnitID = unitData.CurrentUnit.UnitID
+							}
 							clearCourseSelection()
 							if err := config.Save(appConfig); err != nil {
 								appendLog("登录成功，但保存配置失败: " + err.Error())
